@@ -1,0 +1,18 @@
+# ---- 原始数据（100MB+，别人自己下载）----
+data/
+
+# ---- 训练样本与产物 ----
+*.csv
+emb*/
+hits@*.npy
+
+# ---- Python ----
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# ---- macOS ----
+.DS_Store
+
+# ---- 编辑器 ----
+.vscode/

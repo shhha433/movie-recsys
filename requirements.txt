@@ -1,0 +1,9 @@
+# 本项目在以下版本上验证通过（macOS arm64）
+torch>=2.0
+numpy>=1.26
+pandas>=2.0
+scikit-learn>=1.3
+faiss-cpu>=1.7
+
+# 注意：torch 和 faiss-cpu 不要放在同一个进程里使用（macOS 上会因 OpenMP 冲突崩溃）。
+# 详见 README 的"实现中的一个坑"一节。
