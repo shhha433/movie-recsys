@@ -1,12 +1,6 @@
 """
 把所有实验放在一起对比（Faiss Recall@50 + 95% 置信区间）
 ==========================================================
-你**不需要改这个文件**。
-
-它会自动扫描 outputs/week3/ 下所有 emb*/ 目录，
-每个目录算一次 Recall@50，并和基准实验做配对 bootstrap。
-
-所以工作流是：
     1. 在 two_tower.py 里把 EMB_OUT_DIR 改成 "emb_baseline" → 跑 → 得到 baseline
     2. 改成 "emb_lastitem" 并改一行 pooling → 跑
     3. 改成 "emb_cosine" 并改一行归一化 → 跑
@@ -14,9 +8,6 @@
     5. 最后跑这个脚本，自动出对比表
 
 ⚠️ 这个文件只 import numpy + faiss，不要加 torch（OpenMP 冲突会直接崩）。
-
-跑法：
-    /opt/miniconda3/bin/python outputs/week3/recall_eval.py
 """
 
 import os

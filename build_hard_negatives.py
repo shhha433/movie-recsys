@@ -1,8 +1,5 @@
 """
-第 3.5 步：从召回候选里挖难负样本，生成排序层的训练数据
-
-为什么需要这一步
-----------------
+从召回候选里挖难负样本，生成排序层的训练数据
 召回层和排序层如果各训各的，会出现「训练/推理候选分布不一致」：
     训练时负样本是全库随机抽的 —— 随便一部电影，和正样本差得远，闭着眼能分开
     推理时候选是召回 top-50 —— 全是"用户可能喜欢"的，要在鸡蛋里挑骨头
@@ -10,20 +7,6 @@
 
 这一步把训练数据换成「召回 top-K 里挑出来的负样本」，让训练和推理面对同一种难度。
 
-产物
-----
-    data/processed/train_hard.csv    列和 train.csv 完全一样
-                                     （user_id, history, target_item_id, label）
-                                     每个正样本配 4 个难负样本，总数和 train.csv 相同
-
-依赖
-----
-    必须先跑 two_tower.py，它会保存 model_two_tower.pt。
-
-跑法
-----
-    /opt/miniconda3/bin/python build_hard_negatives.py
-    全量约 3-5 分钟；调参时把 MAX_ROWS 设成 200000 先试。
 """
 
 import csv
@@ -87,6 +70,24 @@ def pick_negatives(cands, target, history, k=NEG):
     return picked
 
 
+def pick_random(history, target, all_ids, k=NEG, rng=None):
+    """目标没被召回时的兜底：从全库随机抽负样本。
+
+    如果正样本根本不在 top-K 里，那 top-K 全是
+    "召回模型认为用户会喜欢的物品"。把它们当负样本，等于教模型
+    "召回候选 = 负"，信号会整个反过来（实测 AUC 掉到 0.53）。
+    """
+    rng = rng or np.random
+    seen = set(int(x) for x in history if x != 0)
+    picked = []
+    while len(picked) < k:
+        c = int(rng.choice(all_ids))
+        if c == target or c in seen or c in picked:
+            continue
+        picked.append(c)
+    return picked
+
+
 def main():
     if not os.path.exists(CKPT):
         print(f"找不到召回模型：{CKPT}")
@@ -97,6 +98,9 @@ def main():
     print(f"设备：{device}")
 
     item2idx, n_items = tt.build_vocab()
+    # 反向表：连续索引 → 原始电影 id。写 csv 必须用原始 id，
+    # 否则 din.py 会把索引当成 id 再映射一次，训练数据整体错位。
+    idx2item = {v: k for k, v in item2idx.items()}
     train_df = tt.load_split("train", MAX_ROWS)
     pos = train_df[train_df["label"] == 1].reset_index(drop=True)
     print(f"训练集正样本数：{len(pos)}（每个配 {NEG} 个难负样本）")
@@ -112,8 +116,11 @@ def main():
     print(f"向量算完（{time.time() - t0:.1f}s）：物品 {item_vec.shape}，用户 {user_vec.shape}")
 
     targets = pos["target_item_id"].map(lambda x: item2idx.get(int(x), 0)).to_numpy()
+    raw_targets = pos["target_item_id"].astype(int).to_numpy()   # 原始电影 id，写进 csv 用这个
     histories = pos["history"].fillna("").astype(str).to_numpy()
     user_ids = pos["user_id"].to_numpy()
+    all_raw = np.array(list(item2idx.keys()))   # 随机兜底用
+    n_hard = n_random = 0
 
     os.makedirs(os.path.dirname(OUT_PATH), exist_ok=True)
     t0 = time.time()
@@ -138,9 +145,17 @@ def main():
                 target = int(targets[row])
                 if target <= 0:
                     continue
-                writer.writerow([uid, hist_str, target, 1])
-                for neg in pick_negatives(cands[i], target, hist[i]):
-                    writer.writerow([uid, hist_str, neg, 0])
+                writer.writerow([uid, hist_str, int(raw_targets[row]), 1])
+                # 只有目标真的被召回了，top-K 才是"和正样本同难度的候选"，才能当难负样本；
+                # 否则 top-K 全是召回模型喜欢的东西，拿来当负样本会把信号教反。
+                if target in set(int(c) for c in cands[i]):
+                    negs = [idx2item[x] for x in pick_negatives(cands[i], target, hist[i])]
+                    n_hard += 1
+                else:
+                    negs = pick_random(hist[i], target, all_raw)
+                    n_random += 1
+                for neg in negs:
+                    writer.writerow([uid, hist_str, int(neg), 0])
                 n_written += 1 + NEG
 
             done = end
@@ -149,6 +164,8 @@ def main():
     print()
     print(f"已写出：{OUT_PATH}")
     print(f"行数：{n_written}（正样本 {n_written // (1 + NEG)}）")
+    print(f"负样本来源：难负样本 {n_hard} 组 / 随机负样本 {n_random} 组"
+          f"（目标被召回的才用难负样本）")
     print()
     print("接着跑 din.py —— 它检测到 train_hard.csv 就会自动用它训练。")
 

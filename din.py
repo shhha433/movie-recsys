@@ -19,7 +19,7 @@ from two_tower import (  # noqa: E402
 # 配置
 # ============================================================
 BATCH_SIZE = 2048
-EPOCHS = 3
+EPOCHS = 10      # 之前 3 轮远没收敛（valid AUC 每轮还在涨），改成 10 轮
 LR = 1e-3
 SEED = 42
 MAX_ROWS = 0      # 0 = 全量；调试先用 200000

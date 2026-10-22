@@ -1,9 +1,22 @@
-# 本项目在以下版本上验证通过（macOS arm64）
+# 本项目在以下环境验证通过（macOS arm64，Python 3.14.7）
+#
+#   安装：/opt/miniconda3/bin/python -m pip install -r requirements.txt
+#
+# 每个脚本用到的依赖不同，别一股脑塞进同一个进程：
+#   prepare_data.py           pandas numpy
+#   two_tower.py              torch numpy pandas scikit-learn
+#   din.py                    torch numpy pandas scikit-learn
+#   build_hard_negatives.py   torch numpy pandas
+#   recall_eval.py            numpy faiss-cpu          ← 只到这一行都不 import torch
+#   rank_eval.py              torch numpy              ← 不 import faiss
+#
+# ⚠️ torch 和 faiss-cpu 在 macOS 上各带一份 OpenMP，同一个进程里先后使用会
+#    静默崩溃（退出码 134/139、无 Python 报错），加环境变量也无效。
+#    所以召回检索（recall_eval.py）和排序评估（rank_eval.py）必须是两个进程。
+#    详见 README「实现中的坑」一节。
+
 torch>=2.0
 numpy>=1.26
 pandas>=2.0
 scikit-learn>=1.3
 faiss-cpu>=1.7
-
-# 注意：torch 和 faiss-cpu 不要放在同一个进程里使用（macOS 上会因 OpenMP 冲突崩溃）。
-# 详见 README 的"实现中的一个坑"一节。

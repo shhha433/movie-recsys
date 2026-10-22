@@ -1,31 +1,3 @@
-"""
-第 2 周任务 3:MovieLens-1M 数据处理
-================================
-把原始的评分日志，变成模型能直接吃的训练样本表。
-
-你只需要填 2 个 TODO:
-    TODO-1  按时间切分 train / valid / test
-    TODO-2  构造样本（历史序列 + 正样本 + 随机负采样）
-
-其余部分（读文件、打印统计、自动自检）都不用改。
-
-运行：
-    /opt/miniconda3/bin/python outputs/week2/prepare_data.py
-
-MovieLens-1M 原始格式（用 :: 分隔）：
-    ratings.dat   UserID::MovieID::Rating::Timestamp
-                  1::1193::5::978300760     ← 用户 1 给电影 1193 打了 5 分
-                  1::661::3::978302109      ← 打 3 分
-    movies.dat    MovieID::Title::Genres
-                  1::Toy Story (1995)::Animation|Children's|Comedy
-
-和 MIND 的对应关系（以后要换成 MIND 时对照着看）：
-    MIND 的 user_id        ↔ MovieLens 的 UserID
-    MIND 的 time           ↔ MovieLens 的 Timestamp
-    MIND 的 history        ↔ 该用户之前评分过的电影（由你在 TODO-2 构造）
-    MIND 的「点击了」       ↔ MovieLens 里 Rating >= 4 的交互（当作「喜欢」）
-"""
-
 import os
 import sys
 import random
@@ -43,7 +15,7 @@ RATINGS_PATH = os.path.join(DATA_DIR, "ratings.dat")
 MOVIES_PATH = os.path.join(DATA_DIR, "movies.dat")
 
 MIN_RATING = 4        # 评分 >= 4 才算「喜欢」，拿来当正样本
-MAX_HISTORY = 3     # 历史序列最多保留最近多少条
+MAX_HISTORY = 20    # 历史序列最多保留最近多少条（3 → 20，2026-10-22 重建）
 NEG_PER_POS = 4       # 每个正样本配几个随机负样本（1 表示正负比 1:1）
 MAX_USERS = 0         # 0 = 全部用户；调试时可以先设成 500
 SPLIT = (0.8, 0.1, 0.1)
@@ -62,16 +34,11 @@ def check_data():
     print("找不到这些文件：")
     for p in missing:
         print("   " + p)
-    print()
-    print("请把 MovieLens-1M 解压到：")
-    print("   " + DATA_DIR)
-    print("目录里应该有 ratings.dat / movies.dat / users.dat 三个文件。")
-    print("下载:https://grouplens.org/datasets/movielens/1m/")
     return False
 
 
 # ============================================================
-# 1. 读原始数据（不用改）
+# 1. 读原始数据
 # ============================================================
 def load_ratings(path, min_rating=MIN_RATING, max_users=MAX_USERS):
     """ratings.dat → DataFrame[user_id, item_id, rating,time]
@@ -165,22 +132,16 @@ def load_movies(path):
 
 
 # ============================================================
-# 2. TODO-1：按时间切分
+# 2. 按时间切分
 # ============================================================
 def split_by_time(df, ratios=SPLIT):
     """
     把所有交互按**时间先后**切成 train / valid / test,返回三个 DataFrame。
 
-    为什么不能随机切分？（第 1 周思考题 4 讲过）
-        随机切分会让训练集里混进「未来」的行为，测试变成开卷考试，指标虚高。
-        真实系统必须用过去预测未来。
-
-    提示（三步）：
         1) 先按时间排序
         2) 算三个切分点：
         3) 用切片返回三份：
     """
-    # TODO-1: 删掉下面这行，写你的代码
     df=df.sort_values("time")
     n=len(df)
     n_train=int(n*ratios[0])
@@ -189,7 +150,7 @@ def split_by_time(df, ratios=SPLIT):
 
 
 # ============================================================
-# 3. TODO-2：构造样本 + 随机负采样
+# 3. 构造样本 + 随机负采样
 # ============================================================
 def build_samples(part_df,bd, user_seen, max_history=MAX_HISTORY, neg_per_pos=NEG_PER_POS):
     """
@@ -199,9 +160,6 @@ def build_samples(part_df,bd, user_seen, max_history=MAX_HISTORY, neg_per_pos=NE
     每一行代表一个「预测任务」：
         给定这个用户的历史序列 history,预测他会不会喜欢 target_item_id。
 
-    正样本：用户真实评分 >= 4 的电影
-    负样本：从全库随机抽一个「他没看过的」电影，标 0
-
     例子（某个用户的观影序列，按时间排序 = [M1, M2, M3, M4],
           max_history = 2,NEG_PER_POS = 1):
             历史 "M1"     → 目标 M2    label 1   ← 正样本
@@ -210,30 +168,12 @@ def build_samples(part_df,bd, user_seen, max_history=MAX_HISTORY, neg_per_pos=NE
             历史 "M1 M2"  → 目标 M15   label 0
             历史 "M2 M3"  → 目标 M4    label 1
             历史 "M2 M3"  → 目标 M88   label 0
-    提示（四步）：
         1) 按用户分组，组内按时间排序：
-               for user_id, g in part_df.groupby("user_id", sort=False):
-                   g = g.sort_values("time")
-                   items = g["item_id"].tolist()
         2) 从第 2 个开始滑窗（第 1 个没有历史，做不了样本）：
-               for i in range(1, len(items)):
         3) 历史 = 前面最近的 max_history 个：
-               hist = items[max(0, i - max_history):i]
-           写一行正样本：[user_id, " ".join(map(str, hist)), items[i], 1]
         4) 再配 neg_per_pos 个负样本：
-               从 all_items 里 random.choice 抽一个；
-               抽到「在 user_seen[user_id] 里」或「等于当前目标」的就重抽(while)
-               写一行：[user_id, " ".join(map(str, hist)), neg, 0]
 
-    参数：
-        part_df   切分后的某一份交互(train / valid / test)
-        all_items 全部电影 ID 的列表（用来抽负样本）
-        user_seen dict:user_id → 该用户在**全量数据**里看过的电影集合
-
-    返回:pd.DataFrame,列名必须是 ["user_id", "history", "target_item_id", "label"]
-        history 存成字符串（" ".join(...)），方便写文件
     """
-    # TODO-2: 删掉下面这行，写你的代码
     samples = []
     for user_id,g in part_df.groupby("user_id",sort=False):
         g=g.sort_values("time")
@@ -251,7 +191,7 @@ def build_samples(part_df,bd, user_seen, max_history=MAX_HISTORY, neg_per_pos=NE
 
 
 # ============================================================
-# 4. 统计与自动自检（不用改）
+# 4. 统计与自动自检
 # ============================================================
 def describe(name, samples):
     n = len(samples)

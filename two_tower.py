@@ -18,15 +18,19 @@ _HERE = os.path.dirname(os.path.abspath(__file__))                              
 DATA_DIR = os.path.join(_HERE, "data","processed")                
 MOVIES_PATH = os.path.join(_HERE, "data", "ml-1m", "movies.dat")
 
-MAX_LEN = 10          # history 最多保留最近多少个物品
+MAX_LEN = 20          # history 最多保留最近多少个物品（必须 ≥ MAX_HISTORY，否则会被截断）
 EMB_DIM = 32          # 每层 embedding 的维度
 BATCH_SIZE = 2048
-EPOCHS = 3
+EPOCHS = 10      # 之前 3 轮远没收敛（valid AUC 每轮还在涨），改成 10 轮
 LR = 1e-3
 # 跑对照实验时，只改这一行：把 "emb" 换成实验名，例如 "emb_baseline" / "emb_lastitem"
-EMB_OUT_DIR = os.path.join(_HERE, "emb_baseline_full")
+EMB_OUT_DIR = os.path.join(_HERE, "emb_mask_full")
 SEED = 42
 MAX_ROWS = 0      # 0 = 用全部；调试时设成 200000
+
+# ---- 消融实验开关（跑对照实验时只改这两行）----
+POOLING = "mask"     # "mean"：全部历史求平均 | "last"：取最近一个 | "mask"：写法不同但等价于 mean
+USE_COSINE = False   # True：训练时把用户/物品向量归一化，打分变成余弦
 
 
 def set_seed():
@@ -179,20 +183,27 @@ class TwoTower(nn.Module):
         )
 
     def forward(self, user_seq, item_idx):
-        user_emd=self.item_emb(user_seq)
-        user_vec=self.user_mlp(user_emd.sum(dim=1)/((user_seq!=0).sum(dim=1,keepdim=True).clamp(min=1)))
-        #此处求平均是因为用户塔输出数据的规模是确定的，但用户历史在变长，要求平均去压缩，还有就是默认每个物品权重一致
-        #均值另一种算法如下
-        #mask=(user_seq!=0).float().unsqueeze(-1)
-        #masked_emd=user_emd*mask
-        #user_vec=self.user_mlp(masked_emd.sum(dim=1)/mask.sum(dim=1).clamp(min=1))
-        #user_vec=self.user_mlp(user_emd[:,-1,:])
-        #取最近一个序列，因为是左补0，所以这样做，右就需要算非0的长度减一位置为最近一个的索引
-        item_vec=self.item_mlp(self.item_emb(item_idx))
-        #下面是把数据归一化，这样使得后面计算结果时用的是余弦
-        #user_vec=F.normalize(user_vec,dim=-1)
-        #item_vec=F.normalize(item_vec,dim=-1)
-        return (user_vec,item_vec)
+        # 用户塔必须与候选物品无关，否则无法离线预计算用户向量、Faiss 召回就失效了。
+        # 所以这里只能用「候选无关」的池化：平均 / 最近 N 个。依赖候选的注意力（DIN）属于精排。
+        h = self.item_emb(user_seq)                                  # [B, L, d]
+
+        if POOLING == "last":
+            # 历史是左补 0，所以最后一个位置就是最近的物品
+            pooled = h[:, -1, :]
+        elif POOLING == "mask":
+            # 写法不同，但和 mean 数学等价（用来验证 mask 写法没引入 bug）
+            m = (user_seq != 0).float().unsqueeze(-1)
+            pooled = (h * m).sum(dim=1) / m.sum(dim=1).clamp(min=1)
+        else:
+            pooled = h.sum(dim=1) / (user_seq != 0).sum(dim=1, keepdim=True).clamp(min=1)
+
+        user_vec = self.user_mlp(pooled)
+        item_vec = self.item_mlp(self.item_emb(item_idx))
+
+        if USE_COSINE:
+            user_vec = F.normalize(user_vec, dim=-1)
+            item_vec = F.normalize(item_vec, dim=-1)
+        return (user_vec, item_vec)
 
 
 # ============================================================
