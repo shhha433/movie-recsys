@@ -43,7 +43,7 @@ RATINGS_PATH = os.path.join(DATA_DIR, "ratings.dat")
 MOVIES_PATH = os.path.join(DATA_DIR, "movies.dat")
 
 MIN_RATING = 4        # 评分 >= 4 才算「喜欢」，拿来当正样本
-MAX_HISTORY = 3      # 历史序列最多保留最近多少条
+MAX_HISTORY = 3     # 历史序列最多保留最近多少条
 NEG_PER_POS = 4       # 每个正样本配几个随机负样本（1 表示正负比 1:1）
 MAX_USERS = 0         # 0 = 全部用户；调试时可以先设成 500
 SPLIT = (0.8, 0.1, 0.1)

@@ -1,20 +1,3 @@
-"""
-第 3 周主线：双塔召回模型
-================================
-把第 2 周产出的样本表（227 万行）喂给一个双塔模型，训练完再用 Faiss 算 Recall@50。
-
-这是项目 A 的骨架，也是简历上第一条能写的东西。
-
-你要填 3 个 TODO：
-    TODO-1  build_history_matrix   把 history 字符串变成定长整数矩阵
-    TODO-2  TwoTower.forward       两个塔 + 相似度打分
-    TODO-3  train_one_epoch        一个 epoch 的训练循环（week1 写过，这次自己搭）
-
-其余部分（读数据、建词表、Dataset、AUC 评估、Faiss 检索）都不用改。
-
-
-调试建议：先把 MAX_ROWS 设成 200000 跑通，再改成 0（用全量）。
-"""
 
 import os
 import sys
@@ -31,8 +14,8 @@ import torch.nn.functional as F
 # ============================================================
 # 配置
 # ============================================================
-_HERE = os.path.dirname(os.path.abspath(__file__))          # wo/outputs/week3                                   # wo
-DATA_DIR = os.path.join(_HERE, "data","processed")                # wo/outputs/week2/data
+_HERE = os.path.dirname(os.path.abspath(__file__))                                            # wo
+DATA_DIR = os.path.join(_HERE, "data","processed")                
 MOVIES_PATH = os.path.join(_HERE, "data", "ml-1m", "movies.dat")
 
 MAX_LEN = 10          # history 最多保留最近多少个物品
@@ -40,8 +23,7 @@ EMB_DIM = 32          # 每层 embedding 的维度
 BATCH_SIZE = 2048
 EPOCHS = 3
 LR = 1e-3
-# ⚠️ 跑对照实验时，只改这一行：把 "emb" 换成实验名，例如 "emb_baseline" / "emb_lastitem"
-#    目录会自动创建，不会覆盖别的实验。
+# 跑对照实验时，只改这一行：把 "emb" 换成实验名，例如 "emb_baseline" / "emb_lastitem"
 EMB_OUT_DIR = os.path.join(_HERE, "emb_baseline_full")
 SEED = 42
 MAX_ROWS = 0      # 0 = 用全部；调试时设成 200000
@@ -60,7 +42,7 @@ def get_device():
 
 
 # ============================================================
-# 1. 读数据与建词表（不用改）
+# 1. 读数据与建词表
 # ============================================================
 def load_split(name, max_rows=None):
     """读某一份数据。max_rows 只用来缩小【训练集】做快速调试——
@@ -68,7 +50,7 @@ def load_split(name, max_rows=None):
     path = os.path.join(DATA_DIR, f"{name}.csv")
     if not os.path.exists(path):
         print(f"找不到 {path}")
-        print("先跑 outputs/week2/prepare_data.py 生成三个 csv。")
+        print("先跑 prepare_data.py 生成三个 csv。")
         sys.exit(1)
     df = pd.read_csv(path)
     if max_rows:
@@ -91,28 +73,9 @@ def build_vocab():
 
 
 # ============================================================
-# 2. TODO-1：把 history 字符串转成定长整数矩阵
+# 2. 把 history 字符串转成定长整数矩阵
 # ============================================================
 def build_history_matrix(df, item2idx, max_len=MAX_LEN):
-    """
-    把 df 的 "history" 列（形如 "858 2384 593" 的字符串）转成形状 [n, max_len] 的整数矩阵。
-
-    要求：
-        1. 每行取该用户**最近的** max_len 个物品；
-           如果不足 max_len 个，**缺的部分补 0**（0 是 padding）
-        2. 物品 id 用 item2idx 映射成连续索引
-        3. 返回 numpy 数组，形状 [len(df), max_len]，整数类型
-
-    例子（max_len = 4）：
-        history = "11 22 33"      →  [0, 11', 22', 33']      ← 前面补一个 0
-        history = "11 22 33 44 55" →  [22', 33', 44', 55']   ← 只留最近 4 个
-        history = "11"            →  [0, 0, 0, 11']
-        history = ""              →  [0, 0, 0, 0]
-        （11' 表示 item2idx[11]；映射不到的物品也记 0）
-
-    验收：矩阵形状正确、非零元素个数 ≤ 对应行的 history 长度、每行真实物品数量不超过 max_len
-    """
-    # TODO-1: 删掉下面这行，写你的代码
     n=len(df)
     matrix = np.zeros((n,max_len),dtype=np.int64)
     for i, hist in enumerate(df["history"].fillna("").astype(str)):
@@ -136,7 +99,6 @@ class HistoryMatrixError(Exception):
 
 
 def check_history_matrix(df, mat, item2idx, max_len=MAX_LEN):
-    """自动检查 TODO-1 写对了没有。"""
     problems = []
     if not isinstance(mat, np.ndarray):
         return [f"返回值应该是 numpy 数组，实际是 {type(mat).__name__}"]
@@ -163,14 +125,13 @@ def check_history_matrix(df, mat, item2idx, max_len=MAX_LEN):
             break
 
     if problems:
-        print("TODO-1 自检：")
         for p in problems:
             print("  [问题] " + p)
     return problems
 
 
 # ============================================================
-# 3. Dataset（不用改）
+# 3. Dataset
 # ============================================================
 class TwoTowerDataset(Dataset):
     def __init__(self, history_mat, item_idx, labels):
@@ -201,7 +162,7 @@ def build_dataset(df, item2idx, item_mat=None):
 
 
 # ============================================================
-# 4. TODO-2：双塔模型
+# 4.双塔模型
 # ============================================================
 class TwoTower(nn.Module):
     def __init__(self, n_items, emb_dim=EMB_DIM, pad_idx=0):
@@ -218,25 +179,9 @@ class TwoTower(nn.Module):
         )
 
     def forward(self, user_seq, item_idx):
-        """
-        user_seq: [B, max_len] 的历史物品索引（0 是 padding）
-        item_idx: [B]          的候选物品索引
-
-        要求：
-            1. 用户塔：把 user_seq 里每个物品查 embedding，
-               然后对**非 padding 的位置**求平均（padding 不能算进去！），
-               再过 self.user_mlp，得到 [B, emb_dim]
-            2. 物品塔：把 item_idx 查 embedding，过 self.item_mlp，
-               得到 [B, emb_dim]
-            3. 返回两个向量 (user_vec, item_vec)，**不用**算相似度
-
-        提示：只用一层 nn.Embedding 就行（历史物品和目标物品共用同一张表）
-        验收：两个返回值形状都是 [B, emb_dim]；padding 的位置不参与平均
-        """
-        # TODO-2: 删掉下面这行，写你的代码
         user_emd=self.item_emb(user_seq)
         user_vec=self.user_mlp(user_emd.sum(dim=1)/((user_seq!=0).sum(dim=1,keepdim=True).clamp(min=1)))
-        #此处求平均是因为用户塔输出数据的规模是确定的，但用户历史在变长，要求平均去压缩，还有就是默认每个物品权重一致，也可以选择din、最近、时间衰减加权等
+        #此处求平均是因为用户塔输出数据的规模是确定的，但用户历史在变长，要求平均去压缩，还有就是默认每个物品权重一致
         #均值另一种算法如下
         #mask=(user_seq!=0).float().unsqueeze(-1)
         #masked_emd=user_emd*mask
@@ -251,23 +196,9 @@ class TwoTower(nn.Module):
 
 
 # ============================================================
-# 5. TODO-3：一个 epoch 的训练循环
+# 5. 一个 epoch 的训练循环
 # ============================================================
 def train_one_epoch(model, loader, optimizer, loss_fn, device):
-    """
-    跑完一整个 epoch，返回平均训练 loss（float）。
-
-    要求：就是 week1 那四步（清梯度 → 前向 → 算损失 → 反向 + 更新），
-          只不过外面多套一层「遍历 loader」。
-
-    注意几个容易漏的点：
-        - model.train() 放在循环最前面
-        - 数据要 .to(device)
-        - loss 要用 loss.item() 累加（返回普通 float，不是张量）
-    验收：能返回一个浮点数；跑几个 epoch，验证集 AUC 应该明显高于 0.5
-    """
-    # TODO-3: 删掉下面这行，写你的代码
-
     model.train()
     total_loss=0.0
     for seq,item,label in loader:
@@ -290,7 +221,7 @@ def train_one_epoch(model, loader, optimizer, loss_fn, device):
 
 
 # ============================================================
-# 6. 评估（不用改）
+# 6. 评估
 # ============================================================
 @torch.no_grad()
 def evaluate_auc(model, loader, device):
@@ -308,12 +239,6 @@ def evaluate_auc(model, loader, device):
 
 @torch.no_grad()
 def export_vectors(model, valid_df, item2idx, n_items, device, out_dir=EMB_OUT_DIR):
-    """把物品塔和用户塔的输出导出成 npy，交给 recall_eval.py 去检索。
-
-    为什么要分成两个文件？因为 macOS 上 torch 和 faiss-cpu 各带一份 OpenMP，
-    同一个进程里先后使用会直接崩（segfault）。训练进程导出向量、检索进程只做检索，
-    这本来就是工业界的做法（训练和检索服务分离）。
-    """
     os.makedirs(out_dir, exist_ok=True)
     model.eval()
 
@@ -345,7 +270,7 @@ def export_vectors(model, valid_df, item2idx, n_items, device, out_dir=EMB_OUT_D
 
 
 # ============================================================
-# 7. 主流程（不用改）
+# 7. 主流程
 # ============================================================
 def main():
     set_seed()
@@ -387,13 +312,12 @@ def main():
     test_auc = evaluate_auc(model, test_loader, device)
     print(f"test AUC = {test_auc:.4f}")
 
-    print()
     export_vectors(model, valid_df, item2idx, n_items, device)
-    print()
-    print("接着跑这一条，用 Faiss 算 Recall@50：")
-    print("    /opt/miniconda3/bin/python outputs/week3/recall_eval.py")
-    print("把两次运行的输出一起发给 Codex。")
 
+    # 保存召回模型本身：build_hard_negatives.py 要用它给训练集算用户向量
+    ckpt_path = os.path.join(_HERE, "model_two_tower.pt")
+    torch.save(model.state_dict(), ckpt_path)
+    print(f"  召回模型已保存：{ckpt_path}")
 
 if __name__ == "__main__":
     main()

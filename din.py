@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-# ---- 复用 week3 已经写好的工具函数 ----
+# ---- 复用已经写好的工具函数 ----
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)                                        # repo/ 布局：和 two_tower.py 同目录
 from two_tower import (  # noqa: E402
@@ -22,11 +22,15 @@ BATCH_SIZE = 2048
 EPOCHS = 3
 LR = 1e-3
 SEED = 42
-MAX_ROWS = 200000      # 0 = 全量；调试先用 200000
+MAX_ROWS = 0      # 0 = 全量；调试先用 200000
+
+# 排序层的训练数据：第 3.5 步生成难负样本后优先用它，否则退回随机负样本
+_TRAIN_HARD = os.path.join(_HERE, "data", "processed", "train_hard.csv")
+TRAIN_SPLIT = "train_hard" if os.path.exists(_TRAIN_HARD) else "train"
 
 
 # ============================================================
-# DIN 模型（你只填这两个方法）
+# DIN 模型
 # ============================================================
 class DIN(nn.Module):
     def __init__(self, n_items, emb_dim=EMB_DIM, pad_idx=0):
@@ -45,47 +49,24 @@ class DIN(nn.Module):
         )
 
     def attention(self, user_seq, item_idx):
-        """
-        user_seq: [B, L]  历史物品索引（0 是 padding）
-        item_idx: [B]     候选物品索引
+        user_emb=self.item_emb(user_seq)#user_emb:[B,L,d]
+        item_emb=self.item_emb(item_idx).unsqueeze(1).expand(-1,user_seq.size(1),-1)#[B,1,d]->[B,L,d]
+        concat=torch.cat([user_emb,item_emb,user_emb-item_emb],dim=-1)#[B,L,3d]
+        scores = self.att_mlp(concat).squeeze(-1).float()   # [b, l]
+        mask=(user_seq==0)
+        scores = scores.masked_fill(mask, float('-inf'))
+        att=torch.softmax(scores,dim=1)
+        att=torch.nan_to_num(att,nan=0.0)
+        return att
 
-        返回：注意力权重 [B, L]，要求
-            ① 每行加起来 = 1（用 softmax）
-            ② **padding 位置的权重必须是 0**
 
-        思路（六步）：
-            1. 历史向量 h = self.item_emb(user_seq)                  → [B, L, d]
-            2. 候选向量 q = self.item_emb(item_idx).unsqueeze(1)      → [B, 1, d]
-            3. 把 q 扩成 [B, L, d]（用 .expand，不要复制内存）
-            4. 三段拼接 [q, h, q - h] → torch.cat(..., dim=-1)        → [B, L, 3d]
-            5. 过 self.att_mlp → [B, L, 1]，再 squeeze(-1) → [B, L]
-            6. 把 padding 位置的分数设成 -inf，再 softmax
-
-        ⚠️ 第 6 步的顺序不能反：**先设 -inf，再 softmax**。
-           如果先 softmax 再置零，剩下的权重和就不等于 1 了。
-        ⚠️ 全部是 padding 的行（理论上你的数据里不会有）softmax 出来是 nan，
-           可以顺手用 torch.nan_to_num(att, nan=0.0) 兜一下。
-        """
-        # TODO-1: 删掉下面这行，写你的代码
-        raise NotImplementedError("TODO-1：注意力权重还没写")
 
     def forward(self, user_seq, item_idx):
-        """
-        返回 (user_vec, item_vec)，两个 [B, d] 的向量。
-
-        思路（三步）：
-            1. att = self.attention(user_seq, item_idx)      → [B, L]
-            2. 用 att 给历史向量加权求和：
-               h = self.item_emb(user_seq)                   → [B, L, d]
-               (h * att.unsqueeze(-1)).sum(dim=1)            → [B, d]
-               再过 self.user_mlp
-            3. 物品向量：self.item_mlp(self.item_emb(item_idx))
-
-        ⚠️ att 是 [B, L]，h 是 [B, L, d]，所以 att 要 .unsqueeze(-1) 成 [B, L, 1]
-           才能广播——这和你在 mask_demo.py 里学的是同一件事。
-        """
-        # TODO-2: 删掉下面这行，写你的代码
-        raise NotImplementedError("TODO-2：加权池化还没写")
+        att=self.attention(user_seq,item_idx).unsqueeze(dim=-1)
+        user_emb=self.item_emb(user_seq)
+        user_vec=self.user_mlp((user_emb*att).sum(dim=1))
+        item_vec=self.item_mlp(self.item_emb(item_idx))
+        return user_vec,item_vec
 
 
 # ============================================================
@@ -142,9 +123,11 @@ def main():
     device = get_device()
     print(f"设备：{device}")
 
-    train_df = load_split("train", MAX_ROWS)
+    train_df = load_split(TRAIN_SPLIT, MAX_ROWS)
     valid_df = load_split("valid")
     test_df = load_split("test")
+    print(f"训练数据：{TRAIN_SPLIT}.csv"
+          f"{'（难负样本）' if TRAIN_SPLIT == 'train_hard' else '（随机负样本）'}")
     print(f"train {len(train_df)} / valid {len(valid_df)} / test {len(test_df)}")
 
     item2idx, n_items = build_vocab()
@@ -196,7 +179,14 @@ def main():
     print(f"test AUC = {test_auc:.4f}")
     print()
     print("对照：双塔（均值池化）的 valid AUC = 0.8678、test AUC = 0.8511")
-    print("把上面这几行发给 Codex。")
+
+    # 把训练好的排序模型存下来，交给 rank_eval.py 做「召回 → 排序」端到端评估
+    ckpt_path = os.path.join(_HERE, "model_din.pt")
+    torch.save(model.state_dict(), ckpt_path)
+    print()
+    print(f"模型已保存：{ckpt_path}")
+    print("接着跑这一条，把召回和排序串起来评估：")
+    print(f"    /opt/miniconda3/bin/python {os.path.join(_HERE, 'rank_eval.py')}")
 
 
 if __name__ == "__main__":

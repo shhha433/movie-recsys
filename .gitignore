@@ -5,6 +5,9 @@ data/
 *.csv
 emb*/
 hits@*.npy
+model_din.pt
+model_two_tower.pt
+*.pt
 
 # ---- Python ----
 __pycache__/
