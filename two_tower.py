@@ -75,6 +75,23 @@ def build_vocab():
     item2idx = {iid: i + 1 for i, iid in enumerate(sorted(item_ids))}
     return item2idx, len(item_ids) + 1
 
+def build_genre_matrix(item2idx):
+    """按 item2idx 的顺序，构造 [n_items, 18] 的多热矩阵；第 0 行全 0。"""
+    genres = {}
+    with open(MOVIES_PATH, encoding="latin-1") as fh:
+        for line in fh:
+            parts = line.strip().split("::")
+            if len(parts) < 3:
+                continue
+            genres[int(parts[0])] = parts[2].split("|")
+
+    vocab = sorted({g for gs in genres.values() for g in gs})
+    g2i = {g: i for i, g in enumerate(vocab)}
+    mat = np.zeros((len(item2idx) + 1, len(vocab)), dtype=np.float32)
+    for iid, idx in item2idx.items():
+        for g in genres.get(iid, []):
+            mat[idx, g2i[g]] = 1.0
+    return mat
 
 # ============================================================
 # 2. 把 history 字符串转成定长整数矩阵
@@ -169,12 +186,17 @@ def build_dataset(df, item2idx, item_mat=None):
 # 4.双塔模型
 # ============================================================
 class TwoTower(nn.Module):
-    def __init__(self, n_items, emb_dim=EMB_DIM, pad_idx=0):
+    def __init__(self, n_items, emb_dim=EMB_DIM, pad_idx=0,genre_mat=None):
         #pad_idx告诉 Embedding 表：第 0 号索引是占位符，请把它钉死成全 0，并且不要训练它
         super().__init__()
         self.pad_idx = pad_idx
         self.item_emb = nn.Embedding(n_items, emb_dim, padding_idx=pad_idx)
         #输入的形状是【 a，b ，c 】，输出就会多一维变成【a，b，c，emb_dim】
+        if genre_mat is not None:
+            self.register_buffer("genre_mat", torch.tensor(genre_mat))
+            self.genre_proj = nn.Linear(genre_mat.shape[1], emb_dim, bias=False)
+        else:
+            self.genre_mat = None
         self.user_mlp = nn.Sequential(
             nn.Linear(emb_dim, emb_dim), nn.ReLU(), nn.Linear(emb_dim, emb_dim)
         )
@@ -182,10 +204,16 @@ class TwoTower(nn.Module):
             nn.Linear(emb_dim, emb_dim), nn.ReLU(), nn.Linear(emb_dim, emb_dim)
         )
 
+    def _item_vec(self, idx):
+        v = self.item_emb(idx)
+        if self.genre_mat is not None:
+            v = v + self.genre_proj(self.genre_mat[idx])
+        return v
+
     def forward(self, user_seq, item_idx):
         # 用户塔必须与候选物品无关，否则无法离线预计算用户向量、Faiss 召回就失效了。
         # 所以这里只能用「候选无关」的池化：平均 / 最近 N 个。依赖候选的注意力（DIN）属于精排。
-        h = self.item_emb(user_seq)                                  # [B, L, d]
+        h = self._item_vec(user_seq)                                  
 
         if POOLING == "last":
             # 历史是左补 0，所以最后一个位置就是最近的物品
@@ -198,7 +226,7 @@ class TwoTower(nn.Module):
             pooled = h.sum(dim=1) / (user_seq != 0).sum(dim=1, keepdim=True).clamp(min=1)
 
         user_vec = self.user_mlp(pooled)
-        item_vec = self.item_mlp(self.item_emb(item_idx))
+        item_vec = self.item_mlp(self._item_vec(item_idx))
 
         if USE_COSINE:
             user_vec = F.normalize(user_vec, dim=-1)
@@ -295,6 +323,7 @@ def main():
     print(f"  train {len(train_df)} / valid {len(valid_df)} / test {len(test_df)}")
 
     item2idx, n_items = build_vocab()
+    genre_mat = build_genre_matrix(item2idx)
     print(f"  物品数（含 padding 位）：{n_items}")
 
     print("构造输入 ...")
@@ -308,7 +337,7 @@ def main():
     valid_loader = DataLoader(valid_set, batch_size=4096, shuffle=False)
     test_loader = DataLoader(test_set, batch_size=4096, shuffle=False)
 
-    model = TwoTower(n_items).to(device)
+    model = TwoTower(n_items, genre_mat=genre_mat).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
     loss_fn = nn.BCEWithLogitsLoss()
     print(f"模型参数量：{sum(p.numel() for p in model.parameters()):,}")
