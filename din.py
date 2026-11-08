@@ -1,4 +1,4 @@
-
+import argparse
 import os
 import sys
 
@@ -117,17 +117,26 @@ def train_one_epoch(model, loader, optimizer, loss_fn, device):
         total += loss.item()
     return total / len(loader)
 
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--train-split", default=TRAIN_SPLIT)
+    parser.add_argument(
+        "--ckpt-out",
+        default=os.path.join(_HERE, "model_din.pt"),
+    )
+    return parser.parse_args()
 
 def main():
+    args = parse_args()
     set_seed()
     device = get_device()
     print(f"设备：{device}")
 
-    train_df = load_split(TRAIN_SPLIT, MAX_ROWS)
+    train_df = load_split(args.train_split, MAX_ROWS)
     valid_df = load_split("valid")
     test_df = load_split("test")
-    print(f"训练数据：{TRAIN_SPLIT}.csv"
-          f"{'（难负样本）' if TRAIN_SPLIT == 'train_hard' else '（随机负样本）'}")
+    split_type = "难负样本" if args.train_split.startswith("train_hard") else "随机负样本"
+    print(f"训练数据：{args.train_split}.csv（{split_type}）")
     print(f"train {len(train_df)} / valid {len(valid_df)} / test {len(test_df)}")
 
     item2idx, n_items = build_vocab()
@@ -178,10 +187,13 @@ def main():
     test_auc = evaluate_auc(model, test_loader, device)
     print(f"test AUC = {test_auc:.4f}")
     print()
-    print("对照：双塔（均值池化）的 valid AUC = 0.8678、test AUC = 0.8511")
+    print("排序模型的最终价值以 rank_eval.py 的端到端候选重排结果为准。")
 
     # 把训练好的排序模型存下来，交给 rank_eval.py 做「召回 → 排序」端到端评估
-    ckpt_path = os.path.join(_HERE, "model_din.pt")
+    ckpt_path = os.path.abspath(args.ckpt_out)
+    ckpt_dir = os.path.dirname(ckpt_path)
+    if ckpt_dir:
+        os.makedirs(ckpt_dir, exist_ok=True)
     torch.save(model.state_dict(), ckpt_path)
     print()
     print(f"模型已保存：{ckpt_path}")

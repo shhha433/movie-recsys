@@ -1,35 +1,30 @@
-"""
-从召回候选里挖难负样本，生成排序层的训练数据
-召回层和排序层如果各训各的，会出现「训练/推理候选分布不一致」：
-    训练时负样本是全库随机抽的 —— 随便一部电影，和正样本差得远，闭着眼能分开
-    推理时候选是召回 top-50 —— 全是"用户可能喜欢"的，要在鸡蛋里挑骨头
-模型没学过后者，端到端评估自然打不过"直接用召回分数排序"。
-
-这一步把训练数据换成「召回 top-K 里挑出来的负样本」，让训练和推理面对同一种难度。
-
-"""
 
 import csv
 import os
 import sys
 import time
-
+import argparse
 import numpy as np
 import torch
 
 import two_tower as tt
-from two_tower import TwoTower
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
-CKPT = os.path.join(_HERE, "model_two_tower.pt")
-OUT_PATH = os.path.join(_HERE, "data", "processed", "train_hard.csv")
+DEFAULT_CKPT = os.path.join(_HERE, "emb_mask_genre", "model_two_tower.pt")
+out_path = os.path.join(_HERE, "data", "processed", "train_hard.csv")
 
 TOPK = 50         # 召回候选数：从这 K 个里挑负样本
 NEG = 4           # 每个正样本配几个负样本（和 train.csv 的 1:4 保持一致）
 MAX_ROWS = 0      # 0 = 全量；调试时设成 200000
 CHUNK = 4096      # 检索分块大小
 
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--ckpt", default=DEFAULT_CKPT)
+    parser.add_argument("--out", default=out_path)
+    return parser.parse_args()
 
 @torch.no_grad()
 def get_item_vectors(model, n_items, device):
@@ -89,9 +84,12 @@ def pick_random(history, target, all_ids, k=NEG, rng=None):
 
 
 def main():
-    if not os.path.exists(CKPT):
-        print(f"找不到召回模型：{CKPT}")
-        print("先跑 two_tower.py（它现在会保存 model_two_tower.pt）。")
+    args = parse_args()
+    ckpt = os.path.abspath(args.ckpt)
+    out_path = os.path.abspath(args.out)
+    if not os.path.exists(ckpt):
+        print(f"找不到召回模型：{ckpt}")
+        print("先训练对应的双塔模型，再用 --ckpt 指向它。")
         sys.exit(1)
 
     device = tt.get_device()
@@ -105,9 +103,8 @@ def main():
     pos = train_df[train_df["label"] == 1].reset_index(drop=True)
     print(f"训练集正样本数：{len(pos)}（每个配 {NEG} 个难负样本）")
 
-    model = TwoTower(n_items).to(device)
-    model.load_state_dict(torch.load(CKPT, map_location=device))
-    model.eval()
+    model, model_config = tt.load_trained_two_tower(ckpt, device)
+    print(f"召回模型配置：{model_config}")
 
     t0 = time.time()
     item_vec = get_item_vectors(model, n_items, device)
@@ -122,11 +119,11 @@ def main():
     all_raw = np.array(list(item2idx.keys()))   # 随机兜底用
     n_hard = n_random = 0
 
-    os.makedirs(os.path.dirname(OUT_PATH), exist_ok=True)
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
     t0 = time.time()
     n_written = 0
 
-    with open(OUT_PATH, "w", newline="", encoding="utf-8") as fh:
+    with open(out_path, "w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
         writer.writerow(["user_id", "history", "target_item_id", "label"])
 
@@ -162,7 +159,7 @@ def main():
             print(f"  {done}/{len(pos)}  {time.time() - t0:.0f}s", flush=True)
 
     print()
-    print(f"已写出：{OUT_PATH}")
+    print(f"已写出：{out_path}")
     print(f"行数：{n_written}（正样本 {n_written // (1 + NEG)}）")
     print(f"负样本来源：难负样本 {n_hard} 组 / 随机负样本 {n_random} 组"
           f"（目标被召回的才用难负样本）")

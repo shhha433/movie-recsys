@@ -1,37 +1,7 @@
-"""
-召回 → 排序 端到端评估
-
-把召回层和排序层真正串起来，回答两个问题：
-    1. 直接用召回层的分数排序，效果如何？
-    2. 让排序模型（DIN）在召回的候选里重新排序，能不能变好？
-
-流程：
-    1. 读召回层导出的向量（EMB_DIR）
-    2. 对验证集里每个用户，从全库物品里取召回分数最高的 50 个 —— 这就是「召回」
-    3. 两组排序：
-           A. 直接用召回分数排序（也就是召回的原始顺序）
-           B. 用 DIN 给这 50 个候选重新打分、重新排序
-    4. 对比 HR@10 / NDCG@10 / MRR
-
-指标怎么读：
-    Recall@50   天花板——目标物品有没有进候选集。没进来的，排序层再准也救不回来
-    HR@10       端到端——目标最终有没有排进前 10
-    NDCG@10     不只要求进前 10，还要求排得更靠前
-    MRR         目标排名倒数的平均值
-
-注意：这个脚本只 import numpy + torch，**不用 faiss**。
-不是偷懒——macOS 上 faiss-cpu 和 PyTorch 各带一份 OpenMP，同进程会直接崩
-（退出码 134/139，且没有 Python 报错，见 README 第九节）。
-而 3883 个物品的暴力检索只要几秒，根本不需要 ANN；
-只有在工业级的全库规模下，Faiss 才是必需的。
-
-跑法（必须先跑 din.py，它会存下 model_din.pt）：
-    /opt/miniconda3/bin/python rank_eval.py
-"""
-
 import os
 import sys
 import time
+import argparse
 
 import numpy as np
 import torch
@@ -43,8 +13,8 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 
 # 必须和 two_tower.py 的 EMB_OUT_DIR 指向同一个目录：
 # 召回候选、训练难负样本、端到端评估要来自同一个召回模型，否则又会对不齐。
-EMB_DIR = os.path.join(_HERE, "emb_baseline_full")
-CKPT = os.path.join(_HERE, "model_din.pt")           # din.py 训练后保存的排序模型
+DEFAULT_EMB_DIR = "emb_mask_genre"
+DEFAULT_CKPT = "model_din.pt"
 TOPK = 50        # 召回候选数
 RANK_K = 10      # 排序后取前几个
 CHUNK = 8192     # 检索分块大小
@@ -119,21 +89,33 @@ def score_with_din(model, hist, cand, device, batch=BATCH):
 
 
 def main():
-    if not os.path.exists(CKPT):
-        print(f"找不到排序模型：{CKPT}")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--emb-dir", default=DEFAULT_EMB_DIR)
+    parser.add_argument("--ckpt", default=DEFAULT_CKPT)
+    args = parser.parse_args()
+
+    emb_dir = os.path.join(_HERE, args.emb_dir)
+    ckpt = os.path.join(_HERE, args.ckpt)
+
+    vec_path = os.path.join(emb_dir, "item_vectors.npy")
+    if not os.path.exists(vec_path):
+        print(f"找不到召回向量目录：{emb_dir}")
+        sys.exit(1)
+    if not os.path.exists(ckpt):
+        print(f"找不到排序模型：{ckpt}")
         print("先跑 din.py 训练它。")
         sys.exit(1)
 
     device = tt.get_device()
     print(f"设备      ：{device}")
-    print(f"召回向量  ：{os.path.basename(EMB_DIR)}")
-    print(f"排序模型  ：{os.path.basename(CKPT)}")
+    print(f"召回向量  ：{os.path.basename(emb_dir)}")
+    print(f"排序模型  ：{os.path.basename(ckpt)}")
     print()
 
     # ---- 1. 读召回层导出的向量 ----
-    item_vec = np.load(os.path.join(EMB_DIR, "item_vectors.npy")).astype("float32")
-    user_vec = np.load(os.path.join(EMB_DIR, "valid_user_vectors.npy")).astype("float32")
-    targets = np.load(os.path.join(EMB_DIR, "valid_targets.npy"))
+    item_vec = np.load(os.path.join(emb_dir, "item_vectors.npy")).astype("float32")
+    user_vec = np.load(os.path.join(emb_dir, "valid_user_vectors.npy")).astype("float32")
+    targets = np.load(os.path.join(emb_dir, "valid_targets.npy"))
     keep = targets > 0                      # 只保留目标物品在词表里的样本
     user_vec, targets = user_vec[keep], targets[keep]
     n_items_all = len(item_vec) + 1         # 含 padding 位的物品总数
@@ -167,7 +149,7 @@ def main():
     # ---- 3B. 用 DIN 重新排序 ----
     print("加载排序模型并对候选打分 ...")
     model = DIN(n_items).to(device)
-    model.load_state_dict(torch.load(CKPT, map_location=device))
+    model.load_state_dict(torch.load(ckpt, map_location=device))
 
     t0 = time.time()
     score_b = score_with_din(model, hist, cand, device)

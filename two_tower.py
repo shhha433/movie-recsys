@@ -2,6 +2,7 @@
 import os
 import sys
 import random
+import argparse
 
 import numpy as np
 import pandas as pd
@@ -15,7 +16,7 @@ import torch.nn.functional as F
 # 配置
 # ============================================================
 _HERE = os.path.dirname(os.path.abspath(__file__))                                            # wo
-DATA_DIR = os.path.join(_HERE, "data","processed")                
+DATA_DIR = os.path.join(_HERE, "data","processed")
 MOVIES_PATH = os.path.join(_HERE, "data", "ml-1m", "movies.dat")
 
 MAX_LEN = 20          # history 最多保留最近多少个物品（必须 ≥ MAX_HISTORY，否则会被截断）
@@ -23,20 +24,45 @@ EMB_DIM = 32          # 每层 embedding 的维度
 BATCH_SIZE = 2048
 EPOCHS = 10      # 之前 3 轮远没收敛（valid AUC 每轮还在涨），改成 10 轮
 LR = 1e-3
-# 跑对照实验时，只改这一行：把 "emb" 换成实验名，例如 "emb_baseline" / "emb_lastitem"
-EMB_OUT_DIR = os.path.join(_HERE, "emb_mask_full")
+# 默认输出目录；实际运行时可用 --out-dir 覆盖
+EMB_OUT_DIR = os.path.join(_HERE, "emb_mask_genre")
 SEED = 42
 MAX_ROWS = 0      # 0 = 用全部；调试时设成 200000
 
-# ---- 消融实验开关（跑对照实验时只改这两行）----
+# ---- 默认实验配置，实际运行时由命令行参数覆盖 ----
 POOLING = "mask"     # "mean"：全部历史求平均 | "last"：取最近一个 | "mask"：写法不同但等价于 mean
 USE_COSINE = False   # True：训练时把用户/物品向量归一化，打分变成余弦
+USE_GENRES = True    # 物品向量 = ID embedding + genre projection
 
 
-def set_seed():
-    random.seed(SEED)
-    np.random.seed(SEED)
-    torch.manual_seed(SEED)
+def set_seed(seed=None):
+    seed = SEED if seed is None else seed
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--pooling",
+        choices=("mean", "last", "mask"),
+        default=POOLING,
+    )
+    parser.add_argument(
+        "--genres",
+        action=argparse.BooleanOptionalAction,
+        default=USE_GENRES,
+    )
+    parser.add_argument(
+        "--cosine",
+        action=argparse.BooleanOptionalAction,
+        default=USE_COSINE,
+    )
+    parser.add_argument("--out-dir", default=os.path.basename(EMB_OUT_DIR))
+    parser.add_argument("--epochs", type=int, default=EPOCHS)
+    parser.add_argument("--seed", type=int, default=SEED)
+    return parser.parse_args()
 
 
 def get_device():
@@ -186,9 +212,19 @@ def build_dataset(df, item2idx, item_mat=None):
 # 4.双塔模型
 # ============================================================
 class TwoTower(nn.Module):
-    def __init__(self, n_items, emb_dim=EMB_DIM, pad_idx=0,genre_mat=None):
+    def __init__(
+        self,
+        n_items,
+        emb_dim=EMB_DIM,
+        pad_idx=0,
+        genre_mat=None,
+        pooling=POOLING,
+        use_cosine=USE_COSINE,
+    ):
         #pad_idx告诉 Embedding 表：第 0 号索引是占位符，请把它钉死成全 0，并且不要训练它
         super().__init__()
+        self.pooling = pooling
+        self.use_cosine = use_cosine
         self.pad_idx = pad_idx
         self.item_emb = nn.Embedding(n_items, emb_dim, padding_idx=pad_idx)
         #输入的形状是【 a，b ，c 】，输出就会多一维变成【a，b，c，emb_dim】
@@ -213,12 +249,12 @@ class TwoTower(nn.Module):
     def forward(self, user_seq, item_idx):
         # 用户塔必须与候选物品无关，否则无法离线预计算用户向量、Faiss 召回就失效了。
         # 所以这里只能用「候选无关」的池化：平均 / 最近 N 个。依赖候选的注意力（DIN）属于精排。
-        h = self._item_vec(user_seq)                                  
+        h = self._item_vec(user_seq)
 
-        if POOLING == "last":
+        if self.pooling == "last":
             # 历史是左补 0，所以最后一个位置就是最近的物品
             pooled = h[:, -1, :]
-        elif POOLING == "mask":
+        elif self.pooling == "mask":
             # 写法不同，但和 mean 数学等价（用来验证 mask 写法没引入 bug）
             m = (user_seq != 0).float().unsqueeze(-1)
             pooled = (h * m).sum(dim=1) / m.sum(dim=1).clamp(min=1)
@@ -228,11 +264,45 @@ class TwoTower(nn.Module):
         user_vec = self.user_mlp(pooled)
         item_vec = self.item_mlp(self._item_vec(item_idx))
 
-        if USE_COSINE:
+        if self.use_cosine:
             user_vec = F.normalize(user_vec, dim=-1)
             item_vec = F.normalize(item_vec, dim=-1)
         return (user_vec, item_vec)
 
+def load_trained_two_tower(path, device):
+    """按 checkpoint 中保存的训练配置恢复 TwoTower。"""
+    checkpoint = torch.load(path, map_location=device)
+    if not isinstance(checkpoint, dict) or "state_dict" not in checkpoint:
+        raise ValueError(
+            f"{path} 是旧格式 checkpoint，请用新版 two_tower.py 重新训练"
+        )
+
+    config = checkpoint["config"]
+    item2idx, n_items = build_vocab()
+
+    if n_items != config["n_items"]:
+        raise ValueError(
+            f"词表物品数 {n_items} 与 checkpoint {config['n_items']} 不一致"
+        )
+    if config["max_len"] != MAX_LEN:
+        raise ValueError(
+            f"checkpoint max_len={config['max_len']}，"
+            f"当前代码 MAX_LEN={MAX_LEN}"
+        )
+
+    genre_mat = build_genre_matrix(item2idx) if config["use_genres"] else None
+    model = TwoTower(
+        n_items,
+        emb_dim=config["emb_dim"],
+        pad_idx=config["pad_idx"],
+        genre_mat=genre_mat,
+        pooling=config["pooling"],
+        use_cosine=config["use_cosine"],
+    ).to(device)
+
+    model.load_state_dict(checkpoint["state_dict"])
+    model.eval()
+    return model, config
 
 # ============================================================
 # 5. 一个 epoch 的训练循环
@@ -277,7 +347,8 @@ def evaluate_auc(model, loader, device):
 
 
 @torch.no_grad()
-def export_vectors(model, valid_df, item2idx, n_items, device, out_dir=EMB_OUT_DIR):
+def export_vectors(model, valid_df, item2idx, n_items, device, out_dir=None):
+    out_dir = out_dir or EMB_OUT_DIR
     os.makedirs(out_dir, exist_ok=True)
     model.eval()
 
@@ -312,9 +383,24 @@ def export_vectors(model, valid_df, item2idx, n_items, device, out_dir=EMB_OUT_D
 # 7. 主流程
 # ============================================================
 def main():
-    set_seed()
+    global SEED
+    args = parse_args()
+    SEED = args.seed
+    set_seed(SEED)
+
+    out_dir = (
+        args.out_dir
+        if os.path.isabs(args.out_dir)
+        else os.path.join(_HERE, args.out_dir)
+    )
+    os.makedirs(out_dir, exist_ok=True)
+
     device = get_device()
     print(f"设备：{device}")
+    print(
+        f"配置：pooling={args.pooling} genres={args.genres} "
+        f"cosine={args.cosine} epochs={args.epochs} seed={args.seed}"
+    )
 
     print("读数据 ...")
     train_df = load_split("train", MAX_ROWS)
@@ -323,7 +409,7 @@ def main():
     print(f"  train {len(train_df)} / valid {len(valid_df)} / test {len(test_df)}")
 
     item2idx, n_items = build_vocab()
-    genre_mat = build_genre_matrix(item2idx)
+    genre_mat = build_genre_matrix(item2idx) if args.genres else None
     print(f"  物品数（含 padding 位）：{n_items}")
 
     print("构造输入 ...")
@@ -337,13 +423,18 @@ def main():
     valid_loader = DataLoader(valid_set, batch_size=4096, shuffle=False)
     test_loader = DataLoader(test_set, batch_size=4096, shuffle=False)
 
-    model = TwoTower(n_items, genre_mat=genre_mat).to(device)
+    model = TwoTower(
+        n_items,
+        genre_mat=genre_mat,
+        pooling=args.pooling,
+        use_cosine=args.cosine,
+    ).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
     loss_fn = nn.BCEWithLogitsLoss()
     print(f"模型参数量：{sum(p.numel() for p in model.parameters()):,}")
     print()
 
-    for epoch in range(EPOCHS):
+    for epoch in range(args.epochs):
         loss = train_one_epoch(model, train_loader, optimizer, loss_fn, device)
         auc = evaluate_auc(model, valid_loader, device)
         print(f"epoch {epoch}  train_loss={loss:.4f}  valid_AUC={auc:.4f}")
@@ -352,11 +443,25 @@ def main():
     test_auc = evaluate_auc(model, test_loader, device)
     print(f"test AUC = {test_auc:.4f}")
 
-    export_vectors(model, valid_df, item2idx, n_items, device)
+    export_vectors(model, valid_df, item2idx, n_items, device, out_dir=out_dir)
 
     # 保存召回模型本身：build_hard_negatives.py 要用它给训练集算用户向量
-    ckpt_path = os.path.join(_HERE, "model_two_tower.pt")
-    torch.save(model.state_dict(), ckpt_path)
+    ckpt_path = os.path.join(out_dir, "model_two_tower.pt")
+    torch.save(
+        {
+            "state_dict": model.state_dict(),
+            "config": {
+                "n_items": n_items,
+                "emb_dim": EMB_DIM,
+                "pad_idx": 0,
+                "use_genres": args.genres,
+                "pooling": args.pooling,
+                "use_cosine": args.cosine,
+                "max_len": MAX_LEN,
+            },
+        },
+        ckpt_path,
+    )
     print(f"  召回模型已保存：{ckpt_path}")
 
 if __name__ == "__main__":

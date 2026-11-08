@@ -1,17 +1,6 @@
-"""
-把所有实验放在一起对比（Faiss Recall@50 + 95% 置信区间）
-==========================================================
-    1. 在 two_tower.py 里把 EMB_OUT_DIR 改成 "emb_baseline" → 跑 → 得到 baseline
-    2. 改成 "emb_lastitem" 并改一行 pooling → 跑
-    3. 改成 "emb_cosine" 并改一行归一化 → 跑
-    4. 改成 "emb_mask" 并用 mask 写法 → 跑
-    5. 最后跑这个脚本，自动出对比表
-
-⚠️ 这个文件只 import numpy + faiss，不要加 torch（OpenMP 冲突会直接崩）。
-"""
-
 import os
 import sys
+import argparse
 
 import numpy as np
 import faiss
@@ -24,10 +13,27 @@ N_BOOT = 1000         # bootstrap 重采样次数
 SEED = 42
 BASELINE_NAME = "emb_baseline_full"   # 本次以全量 baseline 为基准
 
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--experiments", nargs="+", default=None)
+    parser.add_argument("--baseline", default="emb_baseline_full")
+    return parser.parse_args()
 
-def find_experiments():
+def find_experiments(selected=None):
     """扫描 outputs/week3/ 下所有 emb*/ 目录，返回排好序的目录名列表。"""
     exps = []
+    if selected:
+        missing = [
+            name for name in selected
+            if not os.path.exists(
+                os.path.join(WEEK3_DIR, name, "item_vectors.npy")
+            )
+        ]
+        if missing:
+            raise FileNotFoundError(
+                f"找不到这些实验的 item_vectors.npy：{missing}"
+            )
+        return list(selected)
     for name in sorted(os.listdir(WEEK3_DIR)):
         d = os.path.join(WEEK3_DIR, name)
         if name.startswith("emb") and os.path.isdir(d) \
@@ -97,19 +103,19 @@ def paired_bootstrap(hits_a, hits_b, n_boot=N_BOOT, seed=SEED):
 
 
 def main():
-    exps = find_experiments()
+    args = parse_args()
+    exps = find_experiments(args.experiments)
     if not exps:
         print(f"{WEEK3_DIR} 下没找到任何 emb*/ 目录。")
         print("先跑 two_tower.py（它会把向量导出到 EMB_OUT_DIR）。")
         sys.exit(1)
 
-    if BASELINE_NAME in exps:
-        base = BASELINE_NAME
-        others = [e for e in exps if e != base]
-        ordered = [base] + others
-    else:
-        ordered = exps
-        base = exps[0]
+    if args.baseline not in exps:
+        print(f"基准 {args.baseline!r} 不在实验列表中：{exps}")
+        sys.exit(1)
+
+    base = args.baseline
+    ordered = [base] + [e for e in exps if e != base]
 
     print(f"发现 {len(exps)} 个实验：")
     for e in exps:
@@ -120,10 +126,12 @@ def main():
     print(f"{'实验':<20}{'Recall@' + str(RECALL_K):>12}{'95% 置信区间':>26}{'命中 / 总数':>18}")
     print("=" * 74)
 
+    targets_all = {}
     hits_all, n_items = {}, None
     for e in ordered:
         d = os.path.join(WEEK3_DIR, e)
         hits, n_items_all, tgt = hit_vector(d)
+        targets_all[e] = tgt
         n_items = n_items_all
         point, lo, hi = bootstrap_ci(hits)
         hits_all[e] = hits
@@ -143,6 +151,9 @@ def main():
     print(f"{'实验':<20}{'差异':>10}{'差异 95% 置信区间':>26}{'p 值':>10}   结论")
     print("-" * 74)
     for e in ordered:
+        if not np.array_equal(targets_all[base], targets_all[e]):
+            print(f"{e:<20}{'—':>10}{'目标顺序不同，跳过':>26}{'—':>10}   不能比较")
+            continue
         if e == base:
             continue
         res = paired_bootstrap(hits_all[base], hits_all[e])
