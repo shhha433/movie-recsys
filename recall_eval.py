@@ -20,7 +20,7 @@ def parse_args():
     return parser.parse_args()
 
 def find_experiments(selected=None):
-    """扫描 outputs/week3/ 下所有 emb*/ 目录，返回排好序的目录名列表。"""
+    """扫描所有 emb*/ 目录，返回排好序的目录名列表。"""
     exps = []
     if selected:
         missing = [

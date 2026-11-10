@@ -145,7 +145,8 @@ class HistoryMatrixError(Exception):
     pass
 
 
-def check_history_matrix(df, mat, item2idx, max_len=MAX_LEN):
+def validate_history_matrix(df, mat, item2idx, max_len=MAX_LEN):
+    """验证 history 的 ID 映射、顺序和 padding 是否符合约定。"""
     problems = []
     if not isinstance(mat, np.ndarray):
         return [f"返回值应该是 numpy 数组，实际是 {type(mat).__name__}"]
@@ -414,7 +415,7 @@ def main():
 
     print("构造输入 ...")
     train_set, train_hist = build_dataset(train_df, item2idx)
-    check_history_matrix(train_df, train_hist, item2idx)
+    validate_history_matrix(train_df, train_hist, item2idx)
     valid_set, _ = build_dataset(valid_df, item2idx)
     test_set, _ = build_dataset(test_df, item2idx)
     print(f"  history 矩阵形状：{train_hist.shape}")

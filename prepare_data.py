@@ -82,7 +82,7 @@ def load_ratings(path, min_rating=MIN_RATING, max_users=MAX_USERS):
 
 def bad_data(path, max_users=MAX_USERS):
     """ratings.dat → DataFrame[user_id, item_id, rating,time]
-    只保留评分 >= min_rating 的交互，这些当作「用户喜欢」。
+    保留评分 <= 2 的交互，这些当作随机负样本池。
     """
     rows = []
     total = 0
@@ -191,7 +191,7 @@ def build_samples(part_df,bd, user_seen, max_history=MAX_HISTORY, neg_per_pos=NE
 
 
 # ============================================================
-# 4. 统计与自动自检
+# 4. 统计与数据校验
 # ============================================================
 def describe(name, samples):
     n = len(samples)
@@ -202,7 +202,8 @@ def describe(name, samples):
     print(f"  {name:<5} {n:>8} 条样本   正样本 {pos:>8} ({pos / n:.0%})   负样本 {n - pos:>8}")
 
 
-def auto_check(train_df, valid_df, test_df, samples, item_sets, user_seen):
+def validate_samples(train_df, valid_df, test_df, samples, item_sets, user_seen):
+    """检查时间顺序、负样本泄漏和样本统计是否一致。"""
     problems = []
 
     def fail(msg):
@@ -289,7 +290,7 @@ def main():
     print()
 
     samples = {"train": train_s, "valid": valid_s, "test": test_s}
-    ok = auto_check(train_df, valid_df, test_df, samples, item_sets, user_seen)
+    ok = validate_samples(train_df, valid_df, test_df, samples, item_sets, user_seen)
 
     print()
     print("样本统计：")

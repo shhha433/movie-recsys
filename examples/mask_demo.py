@@ -2,9 +2,9 @@
 masked mean 演示：用最小的数字，把每一步都打印出来
 =====================================================
 跑法：
-    /opt/miniconda3/bin/python outputs/week3/mask_demo.py
+    /opt/miniconda3/bin/python examples/mask_demo.py
 
-建议你改几个数字再跑一次，比如：
+可以修改几个数字再运行，例如：
     - 把 user_seq 改成自己的数据
     - 把 PAD_ROW 改成别的值，看结果怎么被污染
     - 把 EMB 里的向量改掉

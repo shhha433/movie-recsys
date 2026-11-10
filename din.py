@@ -70,9 +70,9 @@ class DIN(nn.Module):
 
 
 # ============================================================
-# 自动自检（不用改）
+# 训练前不变量检查
 # ============================================================
-def check_din(model, seq, item):
+def validate_din_attention(model, seq, item):
     """检查 attention 是否满足两个硬条件。"""
     problems = []
     try:
@@ -168,7 +168,7 @@ def main():
 
     # ---- 先跑自检，再训练 ----
     seq, item, _ = next(iter(DataLoader(train_set, batch_size=64)))
-    problems = check_din(model, seq.to(device), item.to(device))
+    problems = validate_din_attention(model, seq.to(device), item.to(device))
     if problems:
         print()
         print("自检没通过：")
