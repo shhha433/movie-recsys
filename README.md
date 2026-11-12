@@ -25,6 +25,8 @@ Recall@50 从 **12.12% 提升到 15.19%**（+3.07pp，配对 bootstrap p<0.001�
 > 两组修正后 hard 数据均为 1,819,384 个负样本，target/history/此前喜欢物品泄漏均为 0；
 > 下文 DIN 与端到端指标均来自修正后重训。
 
+更完整的代码关系、文件职责和面试短述见 [`docs/PROJECT_GUIDE.md`](docs/PROJECT_GUIDE.md)。
+
 ---
 
 ## 一、数据集
